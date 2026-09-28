@@ -59,7 +59,7 @@
           </div>
           <div>
             <button type="button" class="btn btn-sm btn-info fw-bold text-dark me-1" onclick="sendAccuracyReport()" style="border-radius: 20px; padding: 5px 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">📤 Kirim Akurasi</button>
-            <button type="button" class="btn btn-sm btn-light fw-bold text-dark" onclick="fetchInitialData()" style="border-radius: 20px; padding: 5px 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">🔄 Refresh</button>
+            <button type="button" class="btn btn-sm btn-light fw-bold text-dark" onclick="fetchInitialData(true)" style="border-radius: 20px; padding: 5px 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">🔄 Refresh</button>
           </div>
         </div>
       </div>
@@ -177,10 +177,14 @@
         fetchInitialData();
       }
       let scanBusy=false, writeBusy=false, boardEpoch=0;
+      let boardTimer=null,boardInFlight=false,boardDirty=false,lastActivity=0,masterLoaded=false;
       async function sendRequest(payload) {
         const request={...payload,mode:payload.mode||appMode};
+        const started=performance.now();
+        if(['checkBin','submitBinAudit','processMaintainBin','addNewBin'].includes(request.action))lastActivity=Date.now();
+        const slow=setTimeout(()=>dashboardNotice('Permintaan '+request.action+' masih diproses. Jangan kirim simpan ulang; tunggu hasil server.'),10000);
         const isWrite=['submitBinAudit','processMaintainBin','addNewBin'].includes(request.action);
-        if(isWrite&&writeBusy)throw new Error('Penyimpanan sebelumnya masih berjalan.');
+        if(isWrite&&writeBusy){clearTimeout(slow);throw new Error('Penyimpanan sebelumnya masih berjalan.');}
         if(isWrite){writeBusy=true;boardEpoch++;}
         try {
           // HtmlService memakai project/deployment yang sedang dibuka.
@@ -191,24 +195,35 @@
           const res=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(request)});
           if(!res.ok)throw new Error('HTTP '+res.status);
           return await res.json();
-        } finally {if(isWrite)writeBusy=false;}
+        } finally {clearTimeout(slow);console.info('[WMS SPEED-R2]',request.action,Math.round(performance.now()-started)+' ms');if(isWrite)writeBusy=false;}
       }
       function dashboardNotice(message) {
         let el=document.getElementById('dashboardUpdateNotice');
         if(!el){el=document.createElement('div');el.id='dashboardUpdateNotice';el.style.cssText='padding:8px 16px;color:#92400e;background:#fef3c7;text-align:center;font-size:13px;';document.getElementById('mainAppContent').prepend(el);}
         el.textContent=message;el.hidden=!message;
       }
-      async function refreshBoardAfterSave() {
-        const mode=appMode,epoch=++boardEpoch;
-        dashboardNotice('Data tersimpan. Angka dashboard sedang diperbarui…');
+      function refreshBoardAfterSave() {
+        boardDirty=true;boardEpoch++;
+        dashboardNotice('Data tersimpan. Dashboard diperbarui setelah jeda scan 15 detik; tekan Refresh untuk memperbarui sekarang.');
+        scheduleBoardRefresh();
+      }
+      function scheduleBoardRefresh() {
+        clearTimeout(boardTimer);
+        boardTimer=setTimeout(runBoardRefresh,15000);
+      }
+      async function runBoardRefresh() {
+        if(!boardDirty)return;
+        if(boardInFlight||scanBusy||writeBusy||Date.now()-lastActivity<15000){scheduleBoardRefresh();return;}
+        const mode=appMode,epoch=boardEpoch;
+        boardInFlight=true;boardDirty=false;
         try {
           const data=await sendRequest({action:'init',forceRefresh:true,mode:mode});
           if(mode!==appMode||epoch!==boardEpoch)return;
           if(data.status!=='success')throw new Error(data.message||'Refresh gagal');
           updateTaskBoard(data);dashboardNotice('');
         } catch(e) {
-          if(mode===appMode&&epoch===boardEpoch)dashboardNotice('Data sudah tersimpan; dashboard belum diperbarui. Tekan Refresh.');
-        }
+          if(mode===appMode&&epoch===boardEpoch)dashboardNotice('Data tersimpan; dashboard belum diperbarui. Tekan Refresh.');
+        } finally {boardInFlight=false;if(mode!==appMode)fetchInitialData();else if(boardDirty)scheduleBoardRefresh();}
       }
       // ==========================================
       // FUNGSI SUNTIK AKURASI (MENGAMBIL ANGKA DARI LAYAR 100%)
@@ -244,38 +259,29 @@
            }
         });
       }
-      async function fetchInitialData() {
-        const btn = document.getElementById('btnSubmit');
-        btn.disabled = true; btn.innerHTML = '⏳ Menarik Data ' + appMode + '...';
+      async function fetchInitialData(forceRefresh=false) {
+        if(boardInFlight){dashboardNotice('Dashboard sedang dimuat. Scan tetap dapat digunakan.');return;}
+        clearTimeout(boardTimer);boardDirty=false;boardInFlight=true;
+        const mode=appMode,epoch=++boardEpoch;
+        dashboardNotice('Memuat dashboard '+mode+'… Scan bin tetap dapat digunakan.');
+        // Tidak memblokir tombol scan untuk menunggu ringkasan seluruh database.
         try {
-          const mode=appMode,epoch=++boardEpoch;
-          const data = await sendRequest({ action: 'init',forceRefresh:true,mode:mode });
+          const data=await sendRequest({action:'init',forceRefresh:forceRefresh,mode:mode});
           if(mode!==appMode||epoch!==boardEpoch)return;
-          if(data.status === 'success') {
-            const binList = document.getElementById('binList'); 
-            binList.innerHTML = '';
-            data.bins.forEach(b => { 
-                let opt = document.createElement('option'); 
-                opt.value = b; 
-                binList.appendChild(opt); 
-            });
-            updateTaskBoard(data);dashboardNotice('');
-            btn.disabled = false; btn.innerHTML = '🔍 Cek Bin Ini';
-            fetchMasterMidsSilent();
-          } else {
-            Swal.fire('Error Database', data.message || 'Gagal terhubung ke Google Sheet.', 'error');
-            btn.disabled = false; btn.innerHTML = '⚠️ Coba Lagi';
-          }
-        } catch (e) { 
-            Swal.fire('Offline', 'Koneksi internet bermasalah. Server sibuk.', 'warning');
-            btn.disabled = false; btn.innerHTML = '🔍 Cek Bin Ini (Offline)'; 
-        }
+          if(data.status!=='success')throw new Error(data.message||'Gagal memuat dashboard');
+          const binList=document.getElementById('binList');binList.innerHTML='';
+          data.bins.forEach(b=>{const opt=document.createElement('option');opt.value=b;binList.appendChild(opt);});
+          updateTaskBoard(data);dashboardNotice(forceRefresh?'':'Dashboard dimuat; tekan Refresh untuk memastikan perubahan manual terbaru.');
+          if(!masterLoaded)fetchMasterMidsSilent();
+        } catch(e) {
+          if(mode===appMode&&epoch===boardEpoch)dashboardNotice('Dashboard belum termuat. Tekan Refresh. Scan bin tetap tersedia.');
+        } finally {boardInFlight=false;if(mode!==appMode)fetchInitialData();else if(boardDirty)scheduleBoardRefresh();}
       }
       async function fetchMasterMidsSilent() {
         try {
             const res = await sendRequest({ action: 'getMaster' });
             if(res.status === 'success') {
-                masterDataMids = res.masterMids || {};
+                masterDataMids = res.masterMids || {};masterLoaded=true;
             }
         } catch (e) {
             console.log("Gagal menarik master data di jalur belakang", e);
