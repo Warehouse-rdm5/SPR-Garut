@@ -566,6 +566,16 @@ function snapshotStats(records) {
 
         // Selalu gunakan deployment yang ditentukan pada script.
         input.value = WEBAPP_URL;
+        // Langsung membuka webapp baru dengan koneksi kamera GitHub.
+        const targetWebapp = new URL(WEBAPP_URL);
+
+        const scannerPage = new URL(window.location.href);
+        scannerPage.hash = '';
+        scannerPage.search = '';
+
+        targetWebapp.searchParams.set('scannerUrl', scannerPage.href);
+        window.location.replace(targetWebapp.href);
+        return;
         document.getElementById('launchWms').onclick=()=>{
           try{
             const u=new URL(input.value.trim());
