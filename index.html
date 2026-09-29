@@ -562,8 +562,10 @@ function snapshotStats(records) {
           return;
         }
         panel.innerHTML='<h2>WMS Bin Checker</h2><p>Dashboard dan penyimpanan berjalan di webapp. Halaman ini menghubungkan kamera live HP.</p><label for="deploymentUrl">Alamat webapp Apps Script (/exec)</label><input id="deploymentUrl" class="form-control mt-2 mb-3" type="url"><button id="launchWms" class="btn btn-primary w-100">Buka Webapp</button><p id="launchMessage" class="mt-3" role="status">Sesudah WMS terbuka, pilih SPR/ECERAN lalu tekan Scan Live.</p>';
-        const input=document.getElementById('deploymentUrl');input.value=WEBAPP_URL;
-        try{input.value=localStorage.getItem('wmsR8Deployment')||WEBAPP_URL;}catch(e){}
+        const input = document.getElementById('deploymentUrl');
+
+        // Selalu gunakan deployment yang ditentukan pada script.
+        input.value = WEBAPP_URL;
         document.getElementById('launchWms').onclick=()=>{
           try{
             const u=new URL(input.value.trim());
