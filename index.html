@@ -180,7 +180,7 @@
       let scanBusy=false, writeBusy=false, boardEpoch=0;
       let boardTimer=null,boardInFlight=false,boardDirty=false,lastActivity=0,masterLoaded=false;
       // R8: tidak ada fetch lintas domain. Semua operasi sheet melalui google.script.run.
-      const WMS_REVISION='BINMAT-R10';
+      const WMS_REVISION='BINMAT-R11';
       let unconfirmedWrite=false;
       const snapshots=Object.create(null);
       function installSnapshot(data){
@@ -350,7 +350,7 @@ function snapshotStats(records) {
            confirmButtonColor: '#2563eb'
         }).then(async (result) => {
            if(result.isConfirmed) {
-              Swal.fire({ title: 'Menghubungi Server...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); }});
+              Swal.fire({ title: 'Menghubungi Server...', allowOutsideClick: false, didOpen: () => { if(writeBusy)Swal.showLoading(); }});
               try {
                  const res = await sendRequest({ action: 'sendAccuracy', accuracyVal: accuracyValue, targetDC: targetDCName });
                  if(res.status === 'success') {
@@ -369,7 +369,7 @@ function snapshotStats(records) {
         if(boardInFlight){dashboardNotice('Dashboard sedang dimuat.');return;}
         clearTimeout(boardTimer);boardDirty=false;boardInFlight=true;
         const mode=appMode,epoch=++boardEpoch;
-        dashboardNotice('Memuat dashboard '+mode+'… Scan bin tetap dapat digunakan.');
+        dashboardNotice('Memuat data '+mode+'… Scan siap setelah daftar selesai dimuat.');
         // Tidak memblokir tombol scan untuk menunggu ringkasan seluruh database.
         try {
           const data=await sendRequest({action:'init',forceRefresh:forceRefresh,mode:mode});
@@ -380,7 +380,7 @@ function snapshotStats(records) {
           data.bins.forEach(b=>{const opt=document.createElement('option');opt.value=b;binList.appendChild(opt);});
           updateTaskBoard(data);dashboardNotice('Data siap. Scan memakai data sesi; hasil simpan diperiksa server. Refresh untuk perubahan pengguna lain.');
         } catch(e) {
-          if(mode===appMode&&epoch===boardEpoch)dashboardNotice('Dashboard belum termuat: '+(e.message||'Tekan Refresh.')+' Scan bin tetap tersedia.');
+          if(mode===appMode&&epoch===boardEpoch)dashboardNotice('Data awal belum termuat: '+(e.message||'Tekan Refresh.')+' Muat data dahulu sebelum scan.');
         } finally {boardInFlight=false;if(mode!==appMode)fetchInitialData();drainPendingScan();}
       }
       async function fetchMasterMidsSilent() {
@@ -440,7 +440,7 @@ function snapshotStats(records) {
         if(scanBusy||writeBusy)return;
         if(unconfirmedWrite){Swal.fire('Menunggu konfirmasi','Periksa hasil simpan sebelumnya di sheet. Permintaan belum boleh dikirim ulang.','info');return;}
         if(!scannerUrl){
-          Swal.fire('Buka melalui halaman scanner','Untuk menghubungkan kamera, buka halaman GitHub versi R10 lalu tekan Buka Webapp. Setelah itu pilih mode dan Scan Live.','info');return;
+          Swal.fire('Buka melalui halaman scanner','Untuk menghubungkan kamera, buka halaman GitHub versi R11 lalu tekan Buka Webapp. Setelah itu pilih mode dan Scan Live.','info');return;
         }
         if(pendingScan){drainPendingScan();return;}
         if(scannerWindow&&!scannerWindow.closed){
@@ -452,7 +452,7 @@ function snapshotStats(records) {
         const bytes=new Uint32Array(4);crypto.getRandomValues(bytes);
         scannerToken=Array.from(bytes,n=>n.toString(16).padStart(8,'0')).join('');
         const target=new URL(scannerUrl);
-        target.searchParams.set('wmsVersion','R10');
+        target.searchParams.set('wmsVersion','R11');
         target.hash=new URLSearchParams({wmsScanner:scannerToken,openerOrigin:location.origin}).toString();
         scannerWindow=window.open(target.href,'_blank','popup,width=520,height=740');
         if(!scannerWindow){scannerToken='';Swal.fire('Kamera belum terbuka','Izinkan pop-up untuk halaman WMS, lalu tekan Scan Live lagi.','info');}
@@ -533,7 +533,7 @@ function snapshotStats(records) {
         finally{cameraStarting=false;}
       }
       function bootWms(){
-        const badge=document.createElement('div');badge.textContent='WMS R10';
+        const badge=document.createElement('div');badge.textContent='WMS R11';
         badge.style.cssText='position:fixed;bottom:4px;right:8px;z-index:10000;font-size:11px;color:#64748b;background:#fff;padding:2px 5px;border-radius:4px;';document.body.appendChild(badge);
         if(inAppsScript()){
           google.script.url.getLocation(loc=>{scannerUrl=safeScannerUrl(loc.parameter&&loc.parameter.scannerUrl||'');});
@@ -545,7 +545,7 @@ function snapshotStats(records) {
         const hash=new URLSearchParams(location.hash.slice(1)),token=hash.get('wmsScanner'),origin=hash.get('openerOrigin');
         if(token){
           let valid=false;try{const o=new URL(origin);valid=o.protocol==='https:'&&o.origin===origin&&o.hostname.endsWith('.googleusercontent.com');}catch(e){}
-          if(!valid||!window.opener||!/^[a-f0-9]{32}$/.test(token)){panel.textContent='Buka kamera dari tombol Scan Live pada WMS R10.';return;}
+          if(!valid||!window.opener||!/^[a-f0-9]{32}$/.test(token)){panel.textContent='Buka kamera dari tombol Scan Live pada WMS R11.';return;}
           scannerSession={token:token,origin:origin,accepted:false};
           panel.innerHTML='<h2>Scan barcode bin</h2><p>Kamera live • tanpa foto atau upload gambar</p><div id="liveReader"></div><p id="cameraMessage" role="status">Membuka kamera…</p><button id="startCamera" class="btn btn-primary w-100" hidden>Aktifkan Kamera</button><button id="returnWms" class="btn btn-primary w-100" hidden>Kembali ke WMS</button><button id="closeCamera" class="btn btn-outline-secondary w-100 mt-2">Tutup Kamera</button>';
           document.getElementById('startCamera').onclick=startLiveCamera;
@@ -612,13 +612,10 @@ function snapshotStats(records) {
         } catch (error) { Swal.fire('Koneksi belum selesai', error.message||'Gagal terhubung ke Database.', 'warning'); } 
         finally { scanBusy=false;btn.innerHTML = '🔍 Cek Bin Ini'; btn.disabled = false; }
       }
-      function toggleRemark(idx, status, suffix) {
-        const input12 = document.getElementById('remark_'+idx), checkArea345 = document.getElementById('check_area_'+idx);
-        if(status === 'notmatch') {
-            if (['03','04','05','06','07','08','09'].includes(suffix)) { checkArea345.style.display = 'block'; document.getElementById('verified_'+idx).value = 'false'; } else { input12.style.display = 'block'; input12.focus(); }
-        } else {
-            if (['03','04','05','06','07','08','09'].includes(suffix)) { checkArea345.style.display = 'none'; document.getElementById('verified_'+idx).value = 'true'; document.getElementById('stock_status_'+idx).innerHTML = ''; } else { input12.style.display = 'none'; input12.value = ''; }
-        }
+      function toggleRemark(idx,status,suffix){
+        const input=document.getElementById('remark_'+idx);
+        if(input)input.style.display='block'; // Keterangan boleh diisi untuk Match / Not Match.
+        const check=document.getElementById('check_area_'+idx);if(check)check.style.display='none';
       }
       async function verifyStock(bin, idx) {
          const actualMid = document.getElementById('actual_mid_'+idx).value.trim(), statusLabel = document.getElementById('stock_status_'+idx);
@@ -642,8 +639,8 @@ function snapshotStats(records) {
            else if (p.status === 'notmatch') { nmCheck = 'checked'; badgeHTML = `<span style="background:#ef4444; color:white; padding: 3px 8px; border-radius: 12px; font-size: 0.75rem; margin-left: 8px;">❌ Sudah Teraudit</span>`; }
            else if (p.status === 'empty') { eCheck = 'checked'; badgeHTML = `<span style="background:#f59e0b; color:white; padding: 3px 8px; border-radius: 12px; font-size: 0.75rem; margin-left: 8px;">📭 Sudah Teraudit</span>`; }
            else { mCheck = 'checked'; }
-           let remarkValue = p.remark && p.remark !== 'ITEM KOSONG' ? p.remark : '';
-           let remarkDisplay = nmCheck === 'checked' ? 'block' : 'none';
+           let remarkValue = String(p.remark && p.remark !== 'ITEM KOSONG' ? p.remark : '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+           let remarkDisplay = 'block';
            let lblBinDetail = p.binLabel ? p.binLabel : bin;
            htmlContent += `
              <div style="border: 2px solid #e2e8f0; padding: 16px; margin-bottom: 15px; border-radius: 14px; background: #ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);">
@@ -659,7 +656,7 @@ function snapshotStats(records) {
                </div>
                <input type="hidden" id="lblBin_${idx}" value="${lblBinDetail}">
                <input type="number" pattern="[0-9]*" inputmode="numeric" id="qty_${idx}" class="form-control form-control-lg mt-3" placeholder="📦 Isi Qty (Opsional)" style="border: 2px solid #cbd5e1; border-radius: 10px; font-weight: 700;">
-               <input type="text" id="remark_${idx}" class="form-control form-control-lg mt-2" value="${remarkValue}" placeholder="✍️ Keterangan wajib..." style="display:${remarkDisplay}; border: 2px solid #ef4444; border-radius: 10px; font-weight: 700; background-color: #fef2f2;">
+               <input type="text" id="remark_${idx}" class="form-control form-control-lg mt-2" value="${remarkValue}" placeholder="✍️ Keterangan (opsional, termasuk Match)" style="display:${remarkDisplay}; border: 2px solid #ef4444; border-radius: 10px; font-weight: 700; background-color: #fef2f2;">
                <div id="check_area_${idx}" style="display:none; margin-top: 15px; background: #fffbeb; padding: 15px; border-radius: 12px; border: 2px solid #fde68a;">
                   <label class="fw-bold mb-2 text-danger" style="font-size:0.85rem;">⚠️ Wajib Cek Aktual Stok</label>
                   <input type="number" pattern="[0-9]*" inputmode="numeric" id="actual_mid_${idx}" class="form-control form-control-lg mb-2" placeholder="Angka Product..." style="font-weight: 700; border-radius: 10px;">
@@ -679,15 +676,8 @@ function snapshotStats(records) {
               let statusVal = document.getElementById('m_'+i).checked ? 'match' : (document.getElementById('nm_'+i).checked ? 'notmatch' : 'empty');
               let qtyVal = document.getElementById('qty_'+i) ? document.getElementById('qty_'+i).value.trim() : '';
               let lblBin = document.getElementById('lblBin_'+i).value;
-              if (['03','04','05','06','07','08','09'].includes(suffix)) {
-                  let isVerified = document.getElementById('verified_'+i).value === 'true', remarkVal = document.getElementById('remark_'+i) ? document.getElementById('remark_'+i).value : '';
-                  if (statusVal === 'notmatch' && !isVerified) { Swal.showValidationMessage('Pastikan status "Not Match" sudah dicek ke Stok!'); return false; }
-                  auditData.push({ row: products[i].row, binLabel: lblBin, product: products[i].product, mid: products[i].mid, status: statusVal, remark: remarkVal, qty: qtyVal });
-              } else {
-                  let remark = document.getElementById('remark_'+i) ? document.getElementById('remark_'+i).value.trim() : '';
-                  if(statusVal === 'notmatch' && remark === '') { Swal.showValidationMessage('Keterangan WAJIB diisi untuk produk Not Match!'); return false; }
-                  auditData.push({ row: products[i].row, binLabel: lblBin, product: products[i].product, mid: products[i].mid, status: statusVal, remark: remark, qty: qtyVal });
-              }
+              const remark=document.getElementById('remark_'+i)?document.getElementById('remark_'+i).value.trim():'';
+              auditData.push({row:products[i].row,binLabel:lblBin,product:products[i].product,mid:products[i].mid,status:statusVal,remark:remark,qty:qtyVal});
             } return auditData;
           }
         }).then(async (result) => {
@@ -697,11 +687,13 @@ function snapshotStats(records) {
         });
       }
       async function submitAuditWithConfirmation(bin,auditData) {
-        Swal.fire({title:'Menyimpan...',allowOutsideClick:false,allowEscapeKey:false,didOpen:()=>Swal.showLoading()});
+        if(writeBusy||unconfirmedWrite){Swal.hideLoading();Swal.fire('Periksa simpan sebelumnya','Konfirmasi sebelumnya belum diterima. Periksa hasil di sheet sebelum mengirim ulang.','warning');return;}
+        Swal.fire({title:'Menyimpan...',allowOutsideClick:false,allowEscapeKey:false,didOpen:()=>{if(writeBusy)Swal.showLoading();}});
         let res;
         try {
           res=await sendRequest({action:'submitBinAudit',bin:bin,auditData:auditData});
         } catch(e) {
+          Swal.hideLoading();
           Swal.fire('Konfirmasi belum diterima','Respons server gagal diterima. Data mungkin sudah tersimpan. Periksa bin sebelum mencoba kembali. '+(e.message||String(e)),'warning');
           return;
         }
@@ -796,7 +788,7 @@ function snapshotStats(records) {
           }
         }).then(async (result) => {
            if (result.isConfirmed) {
-              Swal.fire({ title: 'Memproses Data...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); }});
+              Swal.fire({ title: 'Memproses Data...', allowOutsideClick: false, didOpen: () => { if(writeBusy)Swal.showLoading(); }});
               try {
                   const res = await sendRequest({ action: 'processMaintainBin', bin: bin, maintainData: result.value });
                   if(res.status === 'success') { 
@@ -832,7 +824,7 @@ function snapshotStats(records) {
           }
         }).then(async (result) => {
           if (result.isConfirmed) {
-             Swal.fire({ title: 'Menambahkan Baris Baru...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); }});
+             Swal.fire({ title: 'Menambahkan Baris Baru...', allowOutsideClick: false, didOpen: () => { if(writeBusy)Swal.showLoading(); }});
              try {
                  const addRes = await sendRequest({ action: 'processMaintainBin', bin: bin, maintainData: {updates:[],addData:{newMid:result.value.mid}} });
                  if(addRes.status === 'success') { 
