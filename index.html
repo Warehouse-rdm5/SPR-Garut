@@ -180,7 +180,7 @@
       let scanBusy=false, writeBusy=false, boardEpoch=0;
       let boardTimer=null,boardInFlight=false,boardDirty=false,lastActivity=0,masterLoaded=false;
       // R8: tidak ada fetch lintas domain. Semua operasi sheet melalui google.script.run.
-      const WMS_REVISION='BINMAT-R8';
+      const WMS_REVISION='BINMAT-R9';
       let unconfirmedWrite=false;
       function inAppsScript(){return !!(window.google&&google.script&&google.script.run);}
       function callServer(request,isWrite){
@@ -241,27 +241,12 @@
         el.textContent=message;el.hidden=!message;
       }
       function refreshBoardAfterSave() {
-        boardDirty=true;boardEpoch++;
-        dashboardNotice('Data tersimpan. Dashboard diperbarui setelah jeda scan 15 detik; tekan Refresh untuk memperbarui sekarang.');
-        scheduleBoardRefresh();
+        boardDirty=true;boardEpoch++;clearTimeout(boardTimer);
+        dashboardNotice('Data tersimpan. Lanjut scan bin berikutnya. Tekan Refresh untuk memperbarui angka dashboard.');
       }
       function scheduleBoardRefresh() {
-        clearTimeout(boardTimer);
-        boardTimer=setTimeout(runBoardRefresh,15000);
-      }
-      async function runBoardRefresh() {
-        if(!boardDirty)return;
-        if(boardInFlight||scanBusy||writeBusy||Date.now()-lastActivity<15000){scheduleBoardRefresh();return;}
-        const mode=appMode,epoch=boardEpoch;
-        boardInFlight=true;boardDirty=false;
-        try {
-          const data=await sendRequest({action:'init',forceRefresh:true,mode:mode});
-          if(mode!==appMode||epoch!==boardEpoch)return;
-          if(data.status!=='success')throw new Error(data.message||'Refresh gagal');
-          updateTaskBoard(data);dashboardNotice('');
-        } catch(e) {
-          if(mode===appMode&&epoch===boardEpoch)dashboardNotice('Data tersimpan; dashboard belum diperbarui. Tekan Refresh.');
-        } finally {boardInFlight=false;if(mode!==appMode)fetchInitialData();else if(boardDirty)scheduleBoardRefresh();}
+        // R9: tidak ada polling / refresh otomatis yang bersaing dengan scan berikutnya.
+        clearTimeout(boardTimer);boardTimer=null;
       }
       // ==========================================
       // FUNGSI SUNTIK AKURASI (MENGAMBIL ANGKA DARI LAYAR 100%)
@@ -298,7 +283,8 @@
         });
       }
       async function fetchInitialData(forceRefresh=false) {
-        if(boardInFlight){dashboardNotice('Dashboard sedang dimuat. Scan tetap dapat digunakan.');return;}
+        if(document.hidden||scanBusy||writeBusy||pendingScan||(scannerToken&&scannerWindow&&!scannerWindow.closed)){dashboardNotice('Selesaikan scan dahulu, lalu tekan Refresh untuk angka dashboard.');return;}
+        if(boardInFlight){dashboardNotice('Dashboard sedang dimuat.');return;}
         clearTimeout(boardTimer);boardDirty=false;boardInFlight=true;
         const mode=appMode,epoch=++boardEpoch;
         dashboardNotice('Memuat dashboard '+mode+'… Scan bin tetap dapat digunakan.');
@@ -312,7 +298,7 @@
           updateTaskBoard(data);dashboardNotice(forceRefresh?'':'Dashboard dimuat; tekan Refresh untuk memastikan perubahan manual terbaru.');
         } catch(e) {
           if(mode===appMode&&epoch===boardEpoch)dashboardNotice('Dashboard belum termuat: '+(e.message||'Tekan Refresh.')+' Scan bin tetap tersedia.');
-        } finally {boardInFlight=false;if(mode!==appMode)fetchInitialData();else if(boardDirty)scheduleBoardRefresh();}
+        } finally {boardInFlight=false;if(mode!==appMode)fetchInitialData();drainPendingScan();}
       }
       async function fetchMasterMidsSilent() {
         try {
@@ -359,6 +345,7 @@
       // Kamera berjalan di halaman HTTPS terpisah; hanya kode bin yang dikembalikan.
       // GitHub/hosting statis tidak membaca sheet, tidak memegang token Google, dan tidak POST data.
       let scannerUrl='',scannerWindow=null,scannerToken='',scannerMode='SPR';
+      let pendingScan=null,lastScannerReceipt=null;
       let camera=null,cameraStarting=false,cameraAccepted=false,cameraCancelled=false;
       let scannerSession=null;
       function safeScannerUrl(value){
@@ -370,30 +357,69 @@
         if(scanBusy||writeBusy)return;
         if(unconfirmedWrite){Swal.fire('Menunggu konfirmasi','Periksa hasil simpan sebelumnya di sheet. Permintaan belum boleh dikirim ulang.','info');return;}
         if(!scannerUrl){
-          Swal.fire('Buka melalui halaman scanner','Untuk menghubungkan kamera, buka halaman GitHub versi R8 lalu tekan Buka Webapp. Setelah itu pilih mode dan Scan Live.','info');return;
+          Swal.fire('Buka melalui halaman scanner','Untuk menghubungkan kamera, buka halaman GitHub versi R9 lalu tekan Buka Webapp. Setelah itu pilih mode dan Scan Live.','info');return;
         }
-        if(scannerWindow&&!scannerWindow.closed){scannerWindow.focus();return;}
+        if(pendingScan){drainPendingScan();return;}
+        if(scannerWindow&&!scannerWindow.closed){
+          if(scannerToken){scannerWindow.focus();return;}
+          try{scannerWindow.close();}catch(e){}
+        }
+        clearTimeout(boardTimer);
         scannerMode=appMode;
         const bytes=new Uint32Array(4);crypto.getRandomValues(bytes);
         scannerToken=Array.from(bytes,n=>n.toString(16).padStart(8,'0')).join('');
         const target=new URL(scannerUrl);
+        target.searchParams.set('wmsVersion','R9');
         target.hash=new URLSearchParams({wmsScanner:scannerToken,openerOrigin:location.origin}).toString();
         scannerWindow=window.open(target.href,'_blank','popup,width=520,height=740');
         if(!scannerWindow){scannerToken='';Swal.fire('Kamera belum terbuka','Izinkan pop-up untuk halaman WMS, lalu tekan Scan Live lagi.','info');}
       }
+      function sendScannerAck(target,origin,type,token){
+        try{target.postMessage({type:type,token:token},origin);}catch(e){console.info('Tab kamera telah ditutup.');}
+      }
+      function drainPendingScan(){
+        if(!pendingScan||document.hidden||scanBusy||writeBusy||boardInFlight)return;
+        const item=pendingScan;pendingScan=null;
+        if(item.mode!==appMode){dashboardNotice('Mode berubah. Scan kembali pada mode yang dipilih.');return;}
+        document.getElementById('binCode').value=item.bin;
+        handleFormSubmit(null);
+      }
       window.addEventListener('message',event=>{
         if(!scannerUrl||event.source!==scannerWindow||event.origin!==new URL(scannerUrl).origin)return;
         const data=event.data;
-        if(!data||data.type!=='WMS_SCAN_RESULT'||!scannerToken||data.token!==scannerToken)return;
-        if(typeof data.bin!=='string'||!data.bin.trim()||data.bin.length>120)return;
-        if(scanBusy||writeBusy||appMode!==scannerMode){
-          scannerWindow.postMessage({type:'WMS_SCAN_REJECTED',token:scannerToken},event.origin);return;
+        if(!data||data.type!=='WMS_SCAN_RESULT')return;
+        // Kiriman ulang kode barcode hanya diakui; tidak membuat request kedua.
+        if(lastScannerReceipt&&data.token===lastScannerReceipt.token){
+          sendScannerAck(event.source,event.origin,'WMS_SCAN_ACCEPTED',data.token);return;
         }
-        scannerWindow.postMessage({type:'WMS_SCAN_ACCEPTED',token:scannerToken},event.origin);
-        scannerToken=''; // Satu sesi hanya boleh mengirim satu hasil scan.
-        document.getElementById('binCode').value=data.bin.trim().toUpperCase();
-        handleFormSubmit(null);
+        if(!scannerToken||data.token!==scannerToken)return;
+        if(typeof data.bin!=='string'||!data.bin.trim()||data.bin.length>120)return;
+        if(scanBusy||writeBusy||unconfirmedWrite||appMode!==scannerMode){
+          sendScannerAck(event.source,event.origin,'WMS_SCAN_REJECTED',scannerToken);return;
+        }
+        pendingScan={bin:data.bin.trim().toUpperCase(),mode:scannerMode};
+        lastScannerReceipt={token:scannerToken};scannerToken='';
+        document.getElementById('binCode').value=pendingScan.bin;
+        sendScannerAck(event.source,event.origin,'WMS_SCAN_ACCEPTED',data.token);
+        try{scannerWindow.close();}catch(e){}
+        if(document.hidden)dashboardNotice('Kode bin diterima. Kembali ke WMS untuk memeriksa data.');
+        else if(boardInFlight)dashboardNotice('Kode bin diterima. Menunggu permintaan dashboard selesai.');
+        drainPendingScan();
       });
+      document.addEventListener('visibilitychange',()=>{if(!document.hidden)drainPendingScan();});
+      window.addEventListener('focus',drainPendingScan);
+      function returnScanToWms(bin){
+        const message=document.getElementById('cameraMessage');
+        if(!window.opener||window.opener.closed){message.textContent='Halaman WMS sudah ditutup. Buka WMS lalu Scan Live kembali.';return;}
+        scannerSession.bin=bin;
+        window.opener.postMessage({type:'WMS_SCAN_RESULT',token:scannerSession.token,bin:bin},scannerSession.origin);
+        message.textContent='Terbaca: '+bin+'. Kembali ke tab WMS untuk pemeriksaan.';
+        document.getElementById('returnWms').hidden=false;
+        // Lepaskan tab WMS dari background tanpa menunggu ACK 5 detik.
+        // postMessage telah mengantrekan kode bin; penerima tetap memeriksa source/origin/token.
+        try{window.opener.focus();}catch(e){}
+        window.close();
+      }
       async function stopScanner(){
         cameraCancelled=true;
         const old=camera;
@@ -402,7 +428,9 @@
       async function startLiveCamera(){
         if(cameraStarting||(camera&&camera.isScanning))return;
         if(!scannerSession)return;
+        if(scannerSession.bin){returnScanToWms(scannerSession.bin);return;}
         cameraStarting=true;cameraCancelled=false;cameraAccepted=false;
+        document.getElementById('startCamera').hidden=true;
         const message=document.getElementById('cameraMessage');
         message.textContent='Meminta izin kamera…';
         try{
@@ -415,17 +443,14 @@
               const bin=String(decodedText).trim();if(!bin||bin.length>120)return;
               cameraAccepted=true;
               await stopScanner();
-              message.textContent='Terbaca: '+bin+'. Mengirim kode ke WMS…';
-              if(!window.opener||window.opener.closed){message.textContent='Halaman WMS sudah ditutup. Buka kembali WMS lalu Scan Live.';return;}
-              window.opener.postMessage({type:'WMS_SCAN_RESULT',token:scannerSession.token,bin:bin},scannerSession.origin);
-              setTimeout(()=>{if(!scannerSession.accepted)message.textContent='Belum ada konfirmasi WMS. Kembali ke tab WMS dan periksa kode bin; jangan menyimpan dari halaman kamera.';},5000);
+              returnScanToWms(bin);
             },()=>{});
           if(cameraCancelled)await stopScanner();else message.textContent='Arahkan kamera ke barcode storage bin. Kode diproses otomatis.';
-        }catch(e){message.textContent='Kamera belum aktif: '+(e.message||e)+'. Izinkan kamera di pengaturan situs dan gunakan browser HP.';}
+        }catch(e){document.getElementById('startCamera').hidden=false;message.textContent='Kamera belum aktif: '+(e.message||e)+'. Izinkan kamera di pengaturan situs dan gunakan browser HP.';}
         finally{cameraStarting=false;}
       }
       function bootWms(){
-        const badge=document.createElement('div');badge.textContent='WMS R8';
+        const badge=document.createElement('div');badge.textContent='WMS R9';
         badge.style.cssText='position:fixed;bottom:4px;right:8px;z-index:10000;font-size:11px;color:#64748b;background:#fff;padding:2px 5px;border-radius:4px;';document.body.appendChild(badge);
         if(inAppsScript()){
           google.script.url.getLocation(loc=>{scannerUrl=safeScannerUrl(loc.parameter&&loc.parameter.scannerUrl||'');});
@@ -437,10 +462,11 @@
         const hash=new URLSearchParams(location.hash.slice(1)),token=hash.get('wmsScanner'),origin=hash.get('openerOrigin');
         if(token){
           let valid=false;try{const o=new URL(origin);valid=o.protocol==='https:'&&o.origin===origin&&o.hostname.endsWith('.googleusercontent.com');}catch(e){}
-          if(!valid||!window.opener||!/^[a-f0-9]{32}$/.test(token)){panel.textContent='Buka kamera dari tombol Scan Live pada WMS R8.';return;}
+          if(!valid||!window.opener||!/^[a-f0-9]{32}$/.test(token)){panel.textContent='Buka kamera dari tombol Scan Live pada WMS R9.';return;}
           scannerSession={token:token,origin:origin,accepted:false};
-          panel.innerHTML='<h2>Scan barcode bin</h2><p>Kamera live • tanpa foto atau upload gambar</p><div id="liveReader"></div><p id="cameraMessage" role="status">Tekan Mulai Kamera lalu arahkan ke barcode.</p><button id="startCamera" class="btn btn-primary w-100">Mulai Kamera</button><button id="closeCamera" class="btn btn-outline-secondary w-100 mt-2">Tutup Kamera</button>';
+          panel.innerHTML='<h2>Scan barcode bin</h2><p>Kamera live • tanpa foto atau upload gambar</p><div id="liveReader"></div><p id="cameraMessage" role="status">Membuka kamera…</p><button id="startCamera" class="btn btn-primary w-100" hidden>Aktifkan Kamera</button><button id="returnWms" class="btn btn-primary w-100" hidden>Kembali ke WMS</button><button id="closeCamera" class="btn btn-outline-secondary w-100 mt-2">Tutup Kamera</button>';
           document.getElementById('startCamera').onclick=startLiveCamera;
+          document.getElementById('returnWms').onclick=()=>{if(scannerSession.bin)returnScanToWms(scannerSession.bin);};
           document.getElementById('closeCamera').onclick=async()=>{await stopScanner();window.close();};
           window.addEventListener('message',event=>{
             if(event.source!==window.opener||event.origin!==scannerSession.origin)return;
@@ -449,6 +475,7 @@
             if(d.type==='WMS_SCAN_REJECTED')document.getElementById('cameraMessage').textContent='WMS sedang memproses atau mode berubah. Tutup kamera dan buka Scan Live kembali.';
           });
           document.addEventListener('visibilitychange',()=>{if(document.hidden)stopScanner();});
+          startLiveCamera(); // Langsung mencoba kamera; tombol cadangan hanya jika browser menolak.
           return;
         }
         panel.innerHTML='<h2>WMS Bin Checker</h2><p>Dashboard dan penyimpanan berjalan di webapp. Halaman ini menghubungkan kamera live HP.</p><label for="deploymentUrl">Alamat webapp Apps Script (/exec)</label><input id="deploymentUrl" class="form-control mt-2 mb-3" type="url"><button id="launchWms" class="btn btn-primary w-100">Buka Webapp</button><p id="launchMessage" class="mt-3" role="status">Sesudah WMS terbuka, pilih SPR/ECERAN lalu tekan Scan Live.</p>';
@@ -468,6 +495,11 @@
       async function handleFormSubmit(e) {
         if(e)e.preventDefault();
         if(scanBusy||writeBusy)return;
+        if(document.hidden||boardInFlight){
+          const value=document.getElementById('binCode').value.trim();
+          if(value)pendingScan={bin:value,mode:appMode};
+          return;
+        }
         document.activeElement.blur();
         const binVal = document.getElementById('binCode').value.trim(); if(!binVal) return;
         scanBusy=true;
